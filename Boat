@@ -1,0 +1,157 @@
+AWX integration with Kubernetes vs OpenShift for CI/CD
+
+- Important to note that Kubernetes is a project, OpenShift is a product.  OpenShift *is* Kubernetes, only an enterprise version supported by Red Hat (and its partners e.g. Xilinx SolarFlare).
+
+- Purchasing onload means committing to monthly/yearly subscription costs and RHEL OS for all of our next-gen fun  systems, with the trade off of being able to escalate to Red Hat for inquiries and assistance with system/network tuning and kernel bypass with onload.
+
+- Both Kubernetes and OpenShift support kernel-bypass via the OpenOnload operator. 
+
+https://docs.xilinx.com/r/en-US/ug1586-onload-user/Supported-Network-Adapters. The following network adapters are supported.
+
+AMD X3 series adapters.
+
+Solarflare XtremeScale™ X2 series adapters.
+
+Solarflare XtremeScale™ SFN8000 series
+
+- Red Hat has done extensive benchmarking to prove that low latency cloud-native trading platform solutions can be as performant as bare metal.  In this 2018 benchmarking analysis, Red Hat, Super Micro, and Solarflare worked together to demonstrate that containerizing and orchestrating ultra low latency fun apps was possible without degrading service using the STAC-N1 benchmark.  During the benchmark, the team observed that the 99th percentile latency on the OpenShift system was the same as those of the same system running as bare metal, at both the base rate of 100K messages per second and the highest rate tested of 1 million messages per second (while also breaking a world record for having the lowest mean latency of all publicly disclosed STAC-N1 systems for 264-byte messages at both the base and high message rates)
+
+https://cloud.redhat.com/blog/the-path-to-cloud-native-trading-platforms
+
+- The requires for the STAC-N1 benchmark are HugePages, userland access from a network device, and CPU core isolation. OpenShift supports all three requirements for Huge Pages, direct userland network adapter access via its Device Manager, and core isolation via it CPU Manager.
+
+- the team achieved Kernel bypass  on the STAC-N1 cluster by inventing Kubernetes Device Plug-ins.  Afterwards, Red Hat and SolarFlare went on to write a k8s Device plug-in for SolarFlare network adapters.
+
+- There's a ton of good stuff in the reports (add as much as possible within context to wiki page) in https://stacresearch.com/SFC180604b open shift stack
+
+https://stacresearch.com/SFC180604a bare metal
+
+Deployment and CICD
+
+- AWX would deployed to and running on top of a Kubernetes/OpenShift cluster.
+
+- AWX integration with continuous delivery software  such as Jenkins, Bamboo or Gitlab allows us to create a robust, fully automated  CI/CD pipeline. We will use Gitlab as an example since we are using it already.
+
+- Developer/User/Operator pushes code to git.
+
+- Gitlab actively looking for changes e.g. merges to master. A push activated a trigger that will build a new image 
+
+- Once image is built, AWX triggers to deploy the new image to the product cluster, doing computing resource checks beforehand that will ensure the application will be deployed to a node with adequate resources or scaling
+
+Refer to more stuff here:
+
+https://developers.redhat.com/articles/2023/02/28/how-employ-continuous-deployment-ansible-openshift#prerequisites
+
+---
+
+- name: Perform resource checks and load balancing
+
+  hosts: localhost
+
+  gather_facts: false
+
+  tasks:
+
+    - name: Gather node resource utilization
+
+      k8s_facts:
+
+        kind: Node
+
+        api_version: v1
+
+      register: node_facts
+
+    - name: Calculate available resources
+
+      set_fact:
+
+        target_nodes: []
+
+      loop: "{{ node_facts.resources }}"
+
+      loop_control:
+
+        loop_var: node
+
+      tasks:
+
+        - name: Calculate available CPU percentage
+
+          set_fact:
+
+            cpu_percent: "{{ (node.status.allocatable['cpu'] | int / node.status.capacity['cpu'] | int) * 100 | round(2) }}"
+
+          vars:
+
+            node: "{{ item }}"
+
+          loop: "{{ target_nodes }}"
+
+          loop_control:
+
+            loop_var: node
+
+        - name: Calculate available memory percentage
+
+          set_fact:
+
+            memory_percent: "{{ (node.status.allocatable['memory'] | int / node.status.capacity['memory'] | int) * 100 | round(2) }}"
+
+          vars:
+
+            node: "{{ item }}"
+
+          loop: "{{ target_nodes }}"
+
+          loop_control:
+
+            loop_var: node
+
+    - name: Get deployment information
+
+      k8s_info:
+
+        kind: Deployment
+
+        api_version: apps/v1
+
+        label_selectors:
+
+          app: your-deployment-label
+
+      register: deployment_info
+
+    - name: Balance deployment based on resource utilization
+
+      k8s:
+
+        state: present
+
+        definition:
+
+          apiVersion: apps/v1
+
+          kind: Deployment
+
+          metadata:
+
+            name: "{{ item.metadata.name }}"
+
+          spec:
+
+            replicas: "{{ new_replica_count }}"
+
+        with_items: "{{ deployment_info.resources }}"
+
+        when: item.metadata.labels.app == 'your-deployment-label' and cpu_percent < 50 and memory_percent < 60
+
+        vars:
+
+          new_replica_count: "{{ item.spec.replicas + 1 }}"
+
+          cpu_percent: "{{ cpu_percent }}"
+
+          memory_percent: "{{ memory_percent }}"
+
+
